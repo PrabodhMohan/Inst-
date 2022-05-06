@@ -1,0 +1,428 @@
+stages:
+  - build_eu
+  - unit_tests
+  - deploy_eu
+  - build_us
+  - deploy_us
+  - analyse
+  - autotest
+  - deploy_report
+
+before_script:
+  - export VAULT_TOKEN="$(vault write -field=token auth/jwt/login role=cicd jwt=$CI_JOB_JWT)" 
+
+.common_build:
+  image: registry.code.roche.com/digitallab/ci-docker:latest
+  tags:
+    - gen10
+  variables:
+    CI: "true"
+    NODE_OPTIONS: "--max-old-space-size=4096"
+  cache:
+    key: $CI_JOB_STAGE-$CI_COMMIT_REF_SLUG
+    paths:
+      - .npm/
+  artifacts:
+    paths:
+      - build/
+      - .npmrc
+    expire_in: 20 mins
+  script:
+    - source ./create_env_from_aws.sh
+    - npm install --cache .npm --prefer-offline
+    - npm run build --cache .npm --prefer-offline
+    - echo "BUILD SUCCESSFULLY"
+
+.common_build_dev:
+  extends: .common_build
+  variables:
+    AWS_ENV: "dev"
+    COGNITO_LOGIN_ENABLED: "TRUE"
+    COGNITO_PROVIDER_ID: "wamqa.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_DEV
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_DEV
+  environment:
+    name: roche_development
+  only:
+    - develop
+    - /^dev_release_[0-9]+(?:.[0-9]+)+$/
+
+build_dev_eu:
+  extends: .common_build_dev
+  stage: build_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+build_dev_us:
+  extends: .common_build_dev
+  stage: build_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+.common_build_test:
+  extends: .common_build
+  variables:
+    AWS_ENV: "test"
+    COGNITO_LOGIN_ENABLED: "FALSE"
+    COGNITO_PROVIDER_ID: "wamua.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_TEST
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_TEST
+  environment:
+    name: roche_test
+  only:
+    - test
+    - /^test_release_[0-9]+(?:.[0-9]+)+$/
+
+build_test_eu:
+  extends: .common_build_test
+  stage: build_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+build_test_us:
+  extends: .common_build_test
+  stage: build_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+.common_build_staging:
+  extends: .common_build
+  variables:
+    AWS_ENV: "stg"
+    COGNITO_LOGIN_ENABLED: "FALSE"
+    COGNITO_PROVIDER_ID: "wamua.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_STG
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_STG
+  environment:
+    name: roche_staging
+  only:
+    - staging
+    - /^staging_release_[0-9]+(?:.[0-9]+)+$/
+
+build_test_eu:
+  extends: .common_build_staging
+  stage: build_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+build_test_us:
+  extends: .common_build_staging
+  stage: build_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+
+.common_build_r4stest:
+  extends: .common_build
+  variables:
+    AWS_ENV: "r4stest"
+    COGNITO_LOGIN_ENABLED: "TRUE"
+    COGNITO_PROVIDER_ID: "wamqa.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_DEV
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_DEV
+  environment:
+    name: roche_r4stest
+  only:
+    - /^r4stest_release_[0-9]+(?:.[0-9]+)+$/
+
+build_r4stest_eu:
+  extends: .common_build_r4stest
+  stage: build_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+build_r4stest_us:
+  extends: .common_build_r4stest
+  stage: build_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+
+.common_build_prod:
+  extends: .common_build
+  variables:
+    AWS_ENV: "prod"
+    COGNITO_LOGIN_ENABLED: "FALSE"
+    COGNITO_PROVIDER_ID: "wam.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_PROD
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_PROD
+  environment:
+    name: roche_prod
+  only:
+    - master
+    - /^prod_release_[0-9]+(?:.[0-9]+)+$/
+
+build_prod_eu:
+  extends: .common_build_prod
+  stage: build_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+build_prod_us:
+  extends: .common_build_prod
+  stage: build_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+
+unit_tests:
+  image: registry.code.roche.com/digitallab/ci-docker:latest
+  stage: unit_tests
+  cache:
+    key: $CI_JOB_STAGE-$CI_COMMIT_REF_SLUG
+    paths:
+      - .npm/
+  script:
+    - export NODE_OPTIONS=--max-old-space-size=4096
+    - export HOSTNAME=localhost
+    - export CI=true
+    - npm ci --cache .npm --prefer-offline
+    - npm run test
+  artifacts:
+    paths:
+      - coverage/
+    expire_in: 20 mins
+  only:
+    - develop
+    - test
+    - staging
+    - master
+
+
+report_to_sonar:
+  stage: analyse
+  image: node:14.15.0
+  variables:
+    GIT_DEPTH: 0
+  cache:
+    key: $CI_JOB_STAGE-$CI_COMMIT_REF_SLUG
+    paths:
+      - .npm/
+  script:
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20Root%20CA%201%20-%20G2.crt -o /usr/local/share/ca-certificates/roche-root-ca-1-g2.crt 
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20Enterprise%20CA%201%20-%20G2.crt -o /usr/local/share/ca-certificates/roche-enterprise-ca-1-g2.crt 
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20G3%20Root%20CA.crt -o /usr/local/share/ca-certificates/roche-g3-root-ca.crt 
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20G3%20Issuing%20CA%201.crt -o /usr/local/share/ca-certificates/roche-g3-issuing-ca-1.crt 
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20G3%20Issuing%20CA%202.crt -o /usr/local/share/ca-certificates/roche-g3-issuing-ca-2.crt 
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20G3%20Issuing%20CA%203.crt -o /usr/local/share/ca-certificates/roche-g3-issuing-ca-3.crt 
+    - curl -sSL http://certinfo.roche.com/rootcerts/Roche%20G3%20Issuing%20CA%204.crt -o /usr/local/share/ca-certificates/roche-g3-issuing-ca-4.crt  
+    - update-ca-certificates
+
+    - curl -sSL https://releases.hashicorp.com/vault/1.8.1/vault_1.8.1_linux_amd64.zip -o ./vault.zip && unzip vault.zip && mv vault /usr/local/bin/vault && chmod +x /usr/local/bin/vault
+
+    - export VAULT_TOKEN="$(vault write -field=token auth/jwt/login role=cicd jwt=$CI_JOB_JWT)"
+
+    - export CI=true
+    - npm ci --cache .npm --prefer-offline
+    - export SONAR_HOST_URL=$SONAR_URL
+    - export SONAR_TOKEN=$SONAR_TOKEN
+    - env
+    - yarn sonar
+  allow_failure: true
+  only:
+    - develop
+    
+
+whitesource_scan:
+  image: registry.code.roche.com/digitallab/ci-docker:latest
+  stage: analyse
+  script:
+    - export WHITESOURCE_API_TOKEN="$(vault kv get -field=value /internal/whitesource/apitoken)"
+    - export WHITESOURCE_PRODUCT_TOKEN=4ebdeb2a8f8f4ca4ac61fc3643f999de1b43386d90cc43bdb46c171dc2de7858
+    - export WHITESOURCE_FRONTEND_TOKEN=fc2e21b27cef46b7a70c90fec6a767d7f15b8ab31e4f4d149c3682076d95ea4a
+    - echo "projectPerFolderExcludes='src/__mocks__/** seleniumtests/** __mocks__/** src/features/__mocks__/**'" >> /usr/local/bin/wss-unified-agent.config
+    - java -jar /usr/local/bin/wss-unified-agent.jar -c /usr/local/bin/wss-unified-agent.config -apiKey $WHITESOURCE_API_TOKEN -projectToken $WHITESOURCE_FRONTEND_TOKEN -productToken $WHITESOURCE_PRODUCT_TOKEN
+  allow_failure: true
+  only:
+    - develop
+
+.common_deploy:
+  image: registry.code.roche.com/digitallab/ci-docker:latest
+  tags:
+    - gen10
+  variables:
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+    CI: "true"
+    NODE_OPTIONS: "--max-old-space-size=4096"
+  cache:
+    key: $CI_JOB_STAGE-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cache/pip
+      - venv/
+  before_script:
+    - pip install virtualenv
+    - virtualenv venv
+    - source venv/bin/activate
+  script:
+    - source ./create_env_from_aws.sh
+    - aws --region=${DEFAULT_REGION} s3 sync --delete build s3://${frontend_bucket_name} --sse AES256
+    - aws --region=${DEFAULT_REGION} cloudfront create-invalidation --distribution-id ${distribution_id} --paths '/*'
+    - echo "DEPLOYED SUCCESSFULLY"
+
+.common_deploy_dev:
+  extends: .common_deploy
+  variables:
+    AWS_ENV: "dev"
+    COGNITO_LOGIN_ENABLED: "TRUE"
+    COGNITO_PROVIDER_ID: "wamqa.roche.com"
+    DEFAULT_REGION: $AWS_DEFAULT_REGION_DEV
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_DEV
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_DEV
+  environment:
+    name: roche_development
+  only:
+    - develop
+    - /^dev_release_[0-9]+(?:.[0-9]+)+$/
+
+deploy_dev_eu:
+  extends: .common_deploy_dev
+  stage: deploy_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+deploy_dev_us:
+  extends: .common_deploy_dev
+  stage: deploy_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+
+.common_deploy_test:
+  extends: .common_deploy
+  stage: deploy
+  variables:
+    AWS_ENV: "test"
+    COGNITO_LOGIN_ENABLED: "FALSE"
+    COGNITO_PROVIDER_ID: "wamua.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_TEST
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_TEST
+  environment:
+    name: roche_test
+  only:
+    - /^test_release_[0-9]+(?:.[0-9]+)+$/
+
+deploy_test_eu:
+  extends: .common_deploy_test
+  stage: deploy_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+deploy_test_us:
+  extends: .common_deploy_test
+  stage: deploy_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+.common_deploy_staging:
+  extends: .common_deploy
+  stage: deploy
+  variables:
+    AWS_ENV: "stg"
+    COGNITO_LOGIN_ENABLED: "FALSE"
+    COGNITO_PROVIDER_ID: "wamua.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_STG
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_STG
+  environment:
+    name: roche_staging
+  only:
+    - /^staging_release_[0-9]+(?:.[0-9]+)+$/
+
+deploy_staging_eu:
+  extends: .common_deploy_staging
+  stage: deploy_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+deploy_staging_us:
+  extends: .common_deploy_staging
+  stage: deploy_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+.common_deploy_r4stest:
+  extends: .common_deploy
+  variables:
+    AWS_ENV: "r4stest"
+    COGNITO_LOGIN_ENABLED: "TRUE"
+    COGNITO_PROVIDER_ID: "wamqa.roche.com"
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_DEV
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_DEV
+  environment:
+    name: ready4s_test
+  only:
+    - /^r4stest_release_[0-9]+(?:.[0-9]+)+$/
+
+deploy_r4stest_eu:
+  extends: .common_deploy_r4stest
+  stage: deploy_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+deploy_r4stest_us:
+  extends: .common_deploy_r4stest
+  stage: deploy_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+.common_deploy_prod:
+  extends: .common_deploy
+  variables:
+    AWS_ENV: "prod"
+    COGNITO_LOGIN_ENABLED: "FALSE"
+    COGNITO_PROVIDER_ID: "wam.roche.com"
+    DEFAULT_REGION: $AWS_DEFAULT_REGION_PROD
+    AWS_ACCESS_KEY_ID: $AWS_ACCESS_KEY_ID_PROD
+    AWS_SECRET_ACCESS_KEY: $AWS_SECRET_ACCESS_KEY_PROD
+  environment:
+    name: roche_prod
+  only:
+    - /^prod_release_[0-9]+(?:.[0-9]+)+$/
+
+deploy_prod_eu:
+  extends: .common_deploy_prod
+  stage: deploy_eu
+  variables:
+    DEFAULT_REGION: "eu-central-1"
+
+deploy_prod_us:
+  extends: .common_deploy_prod
+  stage: deploy_us
+  variables:
+    DEFAULT_REGION: "us-west-2"
+
+selenium_tests:
+  image: registry.code.roche.com/digitallab/selenium-chrome:latest
+  tags:
+    - privileged
+    - shm2g
+  stage: autotest
+  allow_failure: true
+  artifacts:
+    when: always
+    paths:
+      - seleniumtests/selenium_report.html
+      - seleniumtests/assets/style.css
+    expire_in: 180 days
+  script:
+    - "sudo chown -R seluser seleniumtests"
+    - "cd seleniumtests"
+    - "python3 -m pytest --reruns 1 --html=selenium_report.html"
+  only:
+    - develop
+    - /^autotest_[0-9]+(?:.[0-9]+)+$/
+    - /^test_release_[0-9]+(?:.[0-9]+)+$/
+    - /^prod_release_[0-9]+(?:.[0-9]+)+$/
+
+pages:
+  stage: deploy_report
+  script:
+    - cp -apr seleniumtests/assets public/
+    - cp seleniumtests/selenium_report.html public/index.html
+  artifacts:
+    paths:
+      - public
+  only:
+    - develop
+    - /^autotest_[0-9]+(?:.[0-9]+)+$/
+    - /^test_release_[0-9]+(?:.[0-9]+)+$/
+    - /^prod_release_[0-9]+(?:.[0-9]+)+$/
